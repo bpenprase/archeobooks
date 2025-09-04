@@ -1,0 +1,100 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>archeo2.db viewer</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <!-- Basic styling -->
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 1.5rem; }
+    table { border-collapse: collapse; width: 100%; table-layout: fixed; }
+    th, td { border: 1px solid #ddd; padding: .5rem; vertical-align: top; overflow-wrap: anywhere; }
+    thead th { position: sticky; top: 0; background: #fafafa; }
+    /* Make one field larger: adjust the class to your column name */
+    .col-summary { width: 60ch; }   /* widen */
+    .col-title   { width: 30ch; }
+    .col-author  { width: 22ch; }
+  </style>
+</head>
+<body>
+  <h1>archeo2.db</h1>
+  <p>Showing first 200 rows from <code>books</code>. Edit the query in the code to change.</p>
+  <div id="status">Loading database…</div>
+  <div id="out"></div>
+
+  <!-- sql.js from CDN -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.10.2/sql-wasm.js"
+          integrity="sha512-+p3w9lKpU5Cz0zOelYQuV9nUHElSvlp3u3Zl1G6YgPrRer5U2b1xzgqO3o0d8n+6A1oYB6hYIbWZ4w3nFYGtGg=="
+          crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+
+  <script>
+    const DB_URL = "https://raw.githubusercontent.com/bpenprase/archeobooks/main/archeo2.db"; // change if needed
+    const QUERY  = "SELECT * FROM books LIMIT 200;"; // change table/query
+
+    async function main() {
+      const status = document.getElementById('status');
+      status.textContent = "Fetching DB…";
+
+      // Load sql.js
+      const SQL = await initSqlJs({ locateFile: f => `https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.10.2/${f}` });
+
+      // Fetch DB bytes (ensure CORS allows this; GitHub Pages works well)
+      const resp = await fetch(DB_URL);
+      if (!resp.ok) throw new Error(`Failed to fetch DB: ${resp.status}`);
+      const buf = new Uint8Array(await resp.arrayBuffer());
+
+      // Open DB
+      const db = new SQL.Database(buf);
+
+      // Run query
+      const res = db.exec(QUERY);
+      if (!res || !res[0]) {
+        status.textContent = "Query returned no rows (check table name/query).";
+        return;
+      }
+      const { columns, values } = res[0];
+
+      // Build table
+      const out = document.getElementById('out');
+      const table = document.createElement('table');
+
+      // Header
+      const thead = document.createElement('thead');
+      const hrow = document.createElement('tr');
+      columns.forEach(col => {
+        const th = document.createElement('th');
+        th.textContent = col;
+        // Add a class like col-summary for CSS width control
+        th.className = `col-${col.toLowerCase()}`;
+        hrow.appendChild(th);
+      });
+      thead.appendChild(hrow);
+      table.appendChild(thead);
+
+      // Body
+      const tbody = document.createElement('tbody');
+      values.forEach(row => {
+        const tr = document.createElement('tr');
+        row.forEach((cell, i) => {
+          const td = document.createElement('td');
+          td.textContent = cell == null ? "" : String(cell);
+          td.className = `col-${columns[i].toLowerCase()}`;
+          tr.appendChild(td);
+        });
+        tbody.appendChild(tr);
+      });
+      table.appendChild(tbody);
+
+      out.innerHTML = "";
+      out.appendChild(table);
+      status.textContent = `Loaded ${values.length} rows.`;
+    }
+
+    main().catch(err => {
+      document.getElementById('status').textContent = `Error: ${err.message}`;
+      console.error(err);
+    });
+  </script>
+</body>
+</html>
+
