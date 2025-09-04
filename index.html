@@ -2,23 +2,30 @@
 <html>
 <head>
   <meta charset="utf-8" />
-  <title>archeo2.db viewer</title>
+  <title>archeo2.db browser</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
     :root { --pad: 12px; }
-    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 1.5rem; }
-    header { display: flex; flex-wrap: wrap; gap: .75rem; align-items: center; margin-bottom: 1rem; }
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 1.5rem; color:#222; }
+    header { display: flex; flex-wrap: wrap; gap: .75rem; align-items: baseline; margin-bottom: 0.75rem; }
     #status { font-size: .95rem; color: #444; }
-    select, button { padding: .4rem .6rem; }
+    .row { display:flex; flex-wrap:wrap; gap:.5rem; align-items:center; }
+    label { font-weight:600; }
+    input[type="text"], select, button { padding: .45rem .6rem; font-size: 0.95rem; }
+    input[type="text"] { min-width: 16rem; }
+    button { cursor:pointer; }
+    hr { border:none; border-top:1px solid #ddd; margin: 1rem 0; }
+
     table { border-collapse: collapse; width: 100%; table-layout: fixed; }
     th, td { border: 1px solid #ddd; padding: var(--pad); vertical-align: top; overflow-wrap: anywhere; }
     thead th { position: sticky; top: 0; background: #fafafa; z-index: 1; }
     tbody tr:nth-child(even) { background: #fcfcfc; }
 
-    /* Adjust widths by column name (lowercased). Edit these as needed. */
-    .col-summary { width: 80ch; }  /* make the summary/abstract column wide */
-    .col-title   { width: 32ch; }
-    .col-author  { width: 24ch; }
+    /* Widen long-text columns by name (lowercased CSS class col-<name>) */
+    .col-summary, .col-abstract, .col-description { width: 90ch; }
+    .col-title { width: 36ch; }
+    .col-author, .col-authors { width: 28ch; }
+    .muted { color:#666; font-size:.92rem; }
   </style>
 </head>
 <body>
@@ -27,37 +34,87 @@
     <div id="status">Loading…</div>
   </header>
 
-  <section style="margin-bottom: .75rem;">
-    <label for="tableSelect"><strong>Table:</strong></label>
+  <div class="row" style="gap:.75rem; margin-bottom:.5rem;">
+    <label for="tableSelect">Table:</label>
     <select id="tableSelect" disabled></select>
-    <button id="reloadBtn" disabled>Reload</button>
-  </section>
+    <button id="showAllBtn" disabled>Show all</button>
+    <span class="muted">Showing up to <code id="limitSpan">500</code> results</span>
+  </div>
 
-  <p id="hint" style="margin-top:0.25rem; color:#555;">
-    Showing first <code>200</code> rows. To widen a field, edit the CSS class <code>.col-&lt;column-name-lowercased&gt;</code> above.
-  </p>
+  <form id="searchForm" onsubmit="return false;" style="display:grid; grid-template-columns: auto 1fr auto; gap:.5rem; align-items:center;">
+    <label for="authorInput">Author</label>
+    <input id="authorInput" type="text" placeholder="e.g., Chumash scholar" disabled />
+    <button id="authorClear" type="button" disabled>×</button>
 
+    <label for="titleInput">Title</label>
+    <input id="titleInput" type="text" placeholder="e.g., Mayan astronomy" disabled />
+    <button id="titleClear" type="button" disabled>×</button>
+
+    <label for="keywordsInput">Keywords</label>
+    <input id="keywordsInput" type="text" placeholder="e.g., Mayan, Chumash" disabled />
+    <button id="keywordsClear" type="button" disabled>×</button>
+
+    <label for="anyInput">Any</label>
+    <input id="anyInput" type="text" placeholder="Search across Author/Title/Keywords" disabled />
+    <button id="anyClear" type="button" disabled>×</button>
+  </form>
+
+  <div class="row" style="gap:.5rem; margin-top:.5rem;">
+    <button id="searchBtn" disabled>Search</button>
+    <button id="clearBtn" disabled>Clear all</button>
+    <span class="muted">Search is case-insensitive and uses partial matching. Comma-separated terms use OR logic within a field.</span>
+  </div>
+
+  <hr/>
   <div id="out"></div>
 
   <!-- sql.js: defines global initSqlJs -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.11.0/sql-wasm.js"></script>
   <script>
-  // ====== EDIT THIS IF YOU MOVE THE FILE ======
+  // ====== EDIT THIS IF YOU MOVE THE DB FILE ======
   const DB_URL = "https://raw.githubusercontent.com/bpenprase/archeobooks/main/archeo2.db";
-  // ============================================
+  // ===============================================
 
-  const ROW_LIMIT = 200;
+  const ROW_LIMIT = 500;
+  document.getElementById('limitSpan').textContent = ROW_LIMIT;
 
   const els = {
     status: document.getElementById('status'),
     out: document.getElementById('out'),
     tableSelect: document.getElementById('tableSelect'),
-    reloadBtn: document.getElementById('reloadBtn'),
+    showAllBtn: document.getElementById('showAllBtn'),
+    author: document.getElementById('authorInput'),
+    title: document.getElementById('titleInput'),
+    keywords: document.getElementById('keywordsInput'),
+    any: document.getElementById('anyInput'),
+    authorClear: document.getElementById('authorClear'),
+    titleClear: document.getElementById('titleClear'),
+    keywordsClear: document.getElementById('keywordsClear'),
+    anyClear: document.getElementById('anyClear'),
+    searchBtn: document.getElementById('searchBtn'),
+    clearBtn: document.getElementById('clearBtn'),
   };
 
-  function setStatus(msg) { els.status.textContent = msg; }
+  let SQL, db;
+  const tableCols = new Map(); // cache: table -> [{name,type},...]
 
-  function renderTable(columns, values) {
+  // Aliases to auto-map your column names
+  const COL_ALIASES = {
+    author:   ["author","authors","creator","writer"],
+    title:    ["title","book_title","name"],
+    keywords: ["keywords","tags","subjects","subject","key_words","descriptors"]
+  };
+
+  function setStatus(msg){ els.status.textContent = msg; }
+  function escapeLike(s){ return s.replace(/([\\%_])/g,"\\$1"); }
+
+  async function fetchDB(url){
+    const resp = await fetch(url, { cache: "no-store" });
+    if (!resp.ok) throw new Error("Failed to fetch DB (" + resp.status + ")");
+    return new Uint8Array(await resp.arrayBuffer());
+  }
+
+  function renderTable(columns, values){
     const table = document.createElement('table');
 
     const thead = document.createElement('thead');
@@ -76,7 +133,7 @@
       const tr = document.createElement('tr');
       row.forEach((cell, i) => {
         const td = document.createElement('td');
-        td.textContent = cell == null ? "" : String(cell);
+        td.textContent = (cell == null) ? "" : String(cell);
         td.className = `col-${columns[i].toLowerCase()}`;
         tr.appendChild(td);
       });
@@ -88,90 +145,196 @@
     els.out.appendChild(table);
   }
 
-  async function openDbBytes(url) {
-    const resp = await fetch(url);
-    if (!resp.ok) throw new Error(`Failed to fetch DB (${resp.status})`);
-    return new Uint8Array(await resp.arrayBuffer());
+  function getColumnsForTable(tableName){
+    if (tableCols.has(tableName)) return tableCols.get(tableName);
+    const res = db.exec(`PRAGMA table_info("${tableName}");`);
+    const rows = res[0]?.values || [];
+    const cols = rows.map(r => ({ name: String(r[1]), type: String(r[2] || "") }));
+    tableCols.set(tableName, cols);
+    return cols;
   }
 
-  async function load() {
-    try {
-      setStatus("Loading sql.js…");
-      const SQL = await initSqlJs({
-        locateFile: f => `https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.11.0/${f}`
-      });
-
-      setStatus("Fetching database…");
-      const buf = await openDbBytes(DB_URL);
-
-      setStatus("Opening database…");
-      const db = new SQL.Database(buf);
-
-      // Discover tables
-      const tablesRes = db.exec(`
-        SELECT name FROM sqlite_master
-        WHERE type='table' AND name NOT LIKE 'sqlite_%'
-        ORDER BY name COLLATE NOCASE;
-      `);
-
-      if (!tablesRes.length || !tablesRes[0].values.length) {
-        setStatus("No user tables found in database.");
-        return;
-      }
-
-      const tables = tablesRes[0].values.map(v => v[0]);
-      // Default to 'books' if present, otherwise first table
-      const defaultTable = tables.includes('books') ? 'books' : tables[0];
-
-      // Populate dropdown
-      els.tableSelect.innerHTML = "";
-      tables.forEach(t => {
-        const opt = document.createElement('option');
-        opt.value = t;
-        opt.textContent = t;
-        if (t === defaultTable) opt.selected = true;
-        els.tableSelect.appendChild(opt);
-      });
-      els.tableSelect.disabled = false;
-      els.reloadBtn.disabled = false;
-
-      function runQueryFor(tableName) {
-        setStatus(`Querying ${tableName}…`);
-        try {
-          const res = db.exec(`SELECT * FROM "${tableName}" LIMIT ${ROW_LIMIT};`);
-          if (!res || !res[0]) {
-            els.out.innerHTML = "";
-            setStatus(`No rows in ${tableName}.`);
-            return;
-          }
-          const { columns, values } = res[0];
-          renderTable(columns, values);
-          setStatus(`Loaded ${values.length} rows from ${tableName}.`);
-        } catch (e) {
-          els.out.innerHTML = "";
-          setStatus(`Error querying ${tableName}: ${e.message}`);
-          console.error(e);
-        }
-      }
-
-      // Initial render
-      runQueryFor(defaultTable);
-
-      // UI events
-      els.tableSelect.addEventListener('change', () => {
-        runQueryFor(els.tableSelect.value);
-      });
-      els.reloadBtn.addEventListener('click', () => {
-        runQueryFor(els.tableSelect.value);
-      });
-
-    } catch (err) {
-      setStatus(`Error: ${err.message}`);
-      console.error(err);
+  function findColumnByAliases(tableName, aliasList){
+    const cols = getColumnsForTable(tableName);
+    const lcToOrig = new Map(cols.map(c => [c.name.toLowerCase(), c.name]));
+    for (const alias of aliasList){
+      const hit = lcToOrig.get(alias.toLowerCase());
+      if (hit) return hit;
     }
+    return null;
   }
 
-  load();
+  function getSearchableTextColumns(tableName){
+    const cols = getColumnsForTable(tableName);
+    const texty = cols.filter(c => /CHAR|CLOB|TEXT/i.test(c.type || ""));
+    return (texty.length ? texty : cols).map(c => c.name);
+  }
+
+  function listAll(tableName){
+    setStatus(`Listing ${tableName}…`);
+    const res = db.exec(`SELECT * FROM "${tableName}" LIMIT ${ROW_LIMIT};`);
+    if (!res || !res[0]) { els.out.innerHTML=""; setStatus("No rows."); return; }
+    const { columns, values } = res[0];
+    renderTable(columns, values);
+    setStatus(`Showing ${values.length} row(s) from ${tableName}.`);
+  }
+
+  function buildWhereAndParams(tableName, fields){
+    // fields: { author, title, keywords, any } – strings or empty
+    const whereParts = [];
+    const params = [];
+
+    // Resolve columns
+    const colAuthor   = findColumnByAliases(tableName, COL_ALIASES.author);
+    const colTitle    = findColumnByAliases(tableName, COL_ALIASES.title);
+    const colKeywords = findColumnByAliases(tableName, COL_ALIASES.keywords);
+
+    // Helper: add OR group for comma-separated terms on ONE column
+    function addOrGroupForColumn(colName, raw){
+      if (!colName || !raw || !raw.trim()) return;
+      const terms = raw.split(",").map(s=>s.trim()).filter(Boolean);
+      if (terms.length === 0) return;
+      const ors = terms.map(()=> `lower(coalesce("${colName}", '')) LIKE ? ESCAPE '\\'`);
+      whereParts.push(`(${ors.join(" OR ")})`);
+      terms.forEach(t => params.push(`%${escapeLike(t.toLowerCase())}%`));
+    }
+
+    // Author / Title / Keywords are ANDed together if multiple fields given
+    addOrGroupForColumn(colAuthor, fields.author);
+    addOrGroupForColumn(colTitle, fields.title);
+    addOrGroupForColumn(colKeywords, fields.keywords);
+
+    // Any: OR across Author/Title/Keywords (and fall back to all text columns)
+    if (fields.any && fields.any.trim()){
+      const terms = fields.any.split(",").map(s=>s.trim()).filter(Boolean);
+      const cols = [colAuthor, colTitle, colKeywords].filter(Boolean);
+      const colsAny = cols.length ? cols : getSearchableTextColumns(tableName);
+
+      // Build ( (c1 LIKE ? OR c2 LIKE ? OR ...) ) for each term, then AND terms together
+      const anyGroup = terms.map(term => {
+        const ors = colsAny.map(c => `lower(coalesce("${c}",'')) LIKE ? ESCAPE '\\'`).join(" OR ");
+        params.push(...Array(colsAny.length).fill(`%${escapeLike(term.toLowerCase())}%`));
+        return `(${ors})`;
+      }).join(" AND ");
+      whereParts.push(`(${anyGroup})`);
+    }
+
+    const whereClause = whereParts.length ? `WHERE ${whereParts.join(" AND ")}` : "";
+    return { whereClause, params };
+  }
+
+  function runSearch(tableName, fields){
+    const { whereClause, params } = buildWhereAndParams(tableName, fields);
+    const sql = `SELECT * FROM "${tableName}" ${whereClause} LIMIT ${ROW_LIMIT};`;
+
+    // Prepare & step to collect rows (keeps column order stable)
+    const stmt = db.prepare(sql);
+    if (params.length) stmt.bind(params);
+
+    const columns = []; let colsCaptured = false;
+    const values = [];
+    while (stmt.step()){
+      const row = stmt.getAsObject();
+      if (!colsCaptured){
+        Object.keys(row).forEach(k => columns.push(k));
+        colsCaptured = true;
+      }
+      values.push(columns.map(k => row[k]));
+      if (values.length >= ROW_LIMIT) break;
+    }
+    stmt.free();
+
+    if (values.length === 0){
+      els.out.innerHTML = "";
+      setStatus("No matches.");
+      return;
+    }
+    renderTable(columns, values);
+    setStatus(`Found ${values.length} match(es).`);
+  }
+
+  async function main(){
+    setStatus("Loading SQL engine…");
+    SQL = await initSqlJs({
+      locateFile: f => `https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.11.0/${f}`
+    });
+
+    setStatus("Fetching database…");
+    const bytes = await fetchDB(DB_URL);
+
+    setStatus("Opening database…");
+    db = new SQL.Database(bytes);
+
+    // Discover user tables
+    const tablesRes = db.exec(`
+      SELECT name FROM sqlite_master
+      WHERE type='table' AND name NOT LIKE 'sqlite_%'
+      ORDER BY name COLLATE NOCASE;
+    `);
+    if (!tablesRes.length || !tablesRes[0].values.length){
+      setStatus("No tables found.");
+      return;
+    }
+    const tables = tablesRes[0].values.map(v => v[0]);
+    const defaultTable = tables.includes('books') ? 'books' : tables[0];
+
+    // Populate dropdown
+    els.tableSelect.innerHTML = "";
+    tables.forEach(t => {
+      const opt = document.createElement('option');
+      opt.value = t; opt.textContent = t;
+      if (t === defaultTable) opt.selected = true;
+      els.tableSelect.appendChild(opt);
+    });
+
+    // Enable UI
+    [
+      els.tableSelect, els.showAllBtn,
+      els.author, els.title, els.keywords, els.any,
+      els.authorClear, els.titleClear, els.keywordsClear, els.anyClear,
+      els.searchBtn, els.clearBtn
+    ].forEach(el => el.disabled = false);
+
+    // Initial view
+    listAll(defaultTable);
+
+    // Events
+    els.tableSelect.addEventListener('change', () => {
+      // Reset cache for good measure
+      els.author.value = els.title.value = els.keywords.value = els.any.value = "";
+      listAll(els.tableSelect.value);
+    });
+    els.showAllBtn.addEventListener('click', () => {
+      els.author.value = els.title.value = els.keywords.value = els.any.value = "";
+      listAll(els.tableSelect.value);
+    });
+
+    els.authorClear.onclick = () => els.author.value = "";
+    els.titleClear.onclick = () => els.title.value = "";
+    els.keywordsClear.onclick = () => els.keywords.value = "";
+    els.anyClear.onclick = () => els.any.value = "";
+
+    els.clearBtn.addEventListener('click', () => {
+      els.author.value = els.title.value = els.keywords.value = els.any.value = "";
+      listAll(els.tableSelect.value);
+    });
+
+    function doSearch(){
+      runSearch(els.tableSelect.value, {
+        author: els.author.value,
+        title: els.title.value,
+        keywords: els.keywords.value,
+        any: els.any.value
+      });
+    }
+    els.searchBtn.addEventListener('click', doSearch);
+    // Enter triggers search from any input
+    [els.author, els.title, els.keywords, els.any].forEach(inp => {
+      inp.addEventListener('keydown', e => { if (e.key === 'Enter') doSearch(); });
+    });
+  }
+
+  main().catch(err => { setStatus("Error: " + err.message); console.error(err); });
   </script>
 </body>
 </html>
