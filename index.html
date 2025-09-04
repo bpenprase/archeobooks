@@ -16,13 +16,24 @@
     button { cursor:pointer; }
     hr { border:none; border-top:1px solid #ddd; margin: 1rem 0; }
 
-    table { border-collapse: collapse; width: 100%; table-layout: fixed; }
-    th, td { border: 1px solid #ddd; padding: var(--pad); vertical-align: top; overflow-wrap: anywhere; }
+    /* NEW: scroll container to avoid squishing columns too much */
+    .table-wrap { overflow-x: auto; }
+
+    /* NEW: let the browser size columns naturally */
+    table { border-collapse: collapse; width: 100%; table-layout: auto; }
+    th, td {
+      border: 1px solid #ddd; padding: var(--pad); vertical-align: top;
+      /* NEW: prefer breaking at words; only break long tokens if needed */
+      overflow-wrap: break-word; word-break: normal; white-space: normal; line-height: 1.35;
+    }
     thead th { position: sticky; top: 0; background: #fafafa; z-index: 1; }
     tbody tr:nth-child(even) { background: #fcfcfc; }
 
     /* Widen long-text columns by name (lowercased CSS class col-<name>) */
-    .col-summary, .col-abstract, .col-description { width: 90ch; }
+    /* NEW: give summary a reasonable min width and allow wrapping */
+    .col-summary, .col-abstract, .col-description {
+      min-width: 60ch; max-width: 110ch; hyphens: auto;
+    }
     .col-title { width: 36ch; }
     .col-author, .col-authors { width: 28ch; }
     .muted { color:#666; font-size:.92rem; }
@@ -66,15 +77,15 @@
   </div>
 
   <hr/>
-  <div id="out"></div>
+  <!-- NEW: wrap results table in a scroll container -->
+  <div class="table-wrap" id="tableWrap">
+    <div id="out"></div>
+  </div>
 
   <!-- sql.js: defines global initSqlJs -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.11.0/sql-wasm.js"></script>
   <script>
-  // ====== EDIT THIS IF YOU MOVE THE DB FILE ======
   const DB_URL = "https://raw.githubusercontent.com/bpenprase/archeobooks/main/archeo2.db";
-  // ===============================================
-
   const ROW_LIMIT = 500;
   document.getElementById('limitSpan').textContent = ROW_LIMIT;
 
@@ -96,9 +107,8 @@
   };
 
   let SQL, db;
-  const tableCols = new Map(); // cache: table -> [{name,type},...]
+  const tableCols = new Map();
 
-  // Aliases to auto-map your column names
   const COL_ALIASES = {
     author:   ["author","authors","creator","writer"],
     title:    ["title","book_title","name"],
@@ -180,16 +190,13 @@
   }
 
   function buildWhereAndParams(tableName, fields){
-    // fields: { author, title, keywords, any } – strings or empty
     const whereParts = [];
     const params = [];
 
-    // Resolve columns
     const colAuthor   = findColumnByAliases(tableName, COL_ALIASES.author);
     const colTitle    = findColumnByAliases(tableName, COL_ALIASES.title);
     const colKeywords = findColumnByAliases(tableName, COL_ALIASES.keywords);
 
-    // Helper: add OR group for comma-separated terms on ONE column
     function addOrGroupForColumn(colName, raw){
       if (!colName || !raw || !raw.trim()) return;
       const terms = raw.split(",").map(s=>s.trim()).filter(Boolean);
@@ -199,18 +206,14 @@
       terms.forEach(t => params.push(`%${escapeLike(t.toLowerCase())}%`));
     }
 
-    // Author / Title / Keywords are ANDed together if multiple fields given
     addOrGroupForColumn(colAuthor, fields.author);
     addOrGroupForColumn(colTitle, fields.title);
     addOrGroupForColumn(colKeywords, fields.keywords);
 
-    // Any: OR across Author/Title/Keywords (and fall back to all text columns)
     if (fields.any && fields.any.trim()){
       const terms = fields.any.split(",").map(s=>s.trim()).filter(Boolean);
       const cols = [colAuthor, colTitle, colKeywords].filter(Boolean);
       const colsAny = cols.length ? cols : getSearchableTextColumns(tableName);
-
-      // Build ( (c1 LIKE ? OR c2 LIKE ? OR ...) ) for each term, then AND terms together
       const anyGroup = terms.map(term => {
         const ors = colsAny.map(c => `lower(coalesce("${c}",'')) LIKE ? ESCAPE '\\'`).join(" OR ");
         params.push(...Array(colsAny.length).fill(`%${escapeLike(term.toLowerCase())}%`));
@@ -227,7 +230,6 @@
     const { whereClause, params } = buildWhereAndParams(tableName, fields);
     const sql = `SELECT * FROM "${tableName}" ${whereClause} LIMIT ${ROW_LIMIT};`;
 
-    // Prepare & step to collect rows (keeps column order stable)
     const stmt = db.prepare(sql);
     if (params.length) stmt.bind(params);
 
@@ -255,9 +257,10 @@
 
   async function main(){
     setStatus("Loading SQL engine…");
-    SQL = await initSqlJs({
+    const SQLMod = await initSqlJs({
       locateFile: f => `https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.11.0/${f}`
     });
+    SQL = SQLMod;
 
     setStatus("Fetching database…");
     const bytes = await fetchDB(DB_URL);
@@ -265,7 +268,6 @@
     setStatus("Opening database…");
     db = new SQL.Database(bytes);
 
-    // Discover user tables
     const tablesRes = db.exec(`
       SELECT name FROM sqlite_master
       WHERE type='table' AND name NOT LIKE 'sqlite_%'
@@ -278,7 +280,6 @@
     const tables = tablesRes[0].values.map(v => v[0]);
     const defaultTable = tables.includes('books') ? 'books' : tables[0];
 
-    // Populate dropdown
     els.tableSelect.innerHTML = "";
     tables.forEach(t => {
       const opt = document.createElement('option');
@@ -287,7 +288,6 @@
       els.tableSelect.appendChild(opt);
     });
 
-    // Enable UI
     [
       els.tableSelect, els.showAllBtn,
       els.author, els.title, els.keywords, els.any,
@@ -295,12 +295,9 @@
       els.searchBtn, els.clearBtn
     ].forEach(el => el.disabled = false);
 
-    // Initial view
     listAll(defaultTable);
 
-    // Events
     els.tableSelect.addEventListener('change', () => {
-      // Reset cache for good measure
       els.author.value = els.title.value = els.keywords.value = els.any.value = "";
       listAll(els.tableSelect.value);
     });
@@ -328,7 +325,6 @@
       });
     }
     els.searchBtn.addEventListener('click', doSearch);
-    // Enter triggers search from any input
     [els.author, els.title, els.keywords, els.any].forEach(inp => {
       inp.addEventListener('keydown', e => { if (e.key === 'Enter') doSearch(); });
     });
