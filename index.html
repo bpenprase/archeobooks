@@ -5,38 +5,35 @@
   <title>archeo2.db browser</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
-    :root { --pad: 12px; }
     body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 1.5rem; color:#222; }
     header { display: flex; flex-wrap: wrap; gap: .75rem; align-items: baseline; margin-bottom: 0.75rem; }
     #status { font-size: .95rem; color: #444; }
-    .row { display:flex; flex-wrap:wrap; gap:.5rem; align-items:center; }
-    label { font-weight:600; }
-    input[type="text"], select, button { padding: .45rem .6rem; font-size: 0.95rem; }
+
+    input[type="text"], button { padding: .45rem .6rem; font-size: 0.95rem; }
     input[type="text"] { min-width: 16rem; }
-    button { cursor:pointer; }
-    hr { border:none; border-top:1px solid #ddd; margin: 1rem 0; }
+    button { cursor: pointer; }
 
-    /* NEW: scroll container to avoid squishing columns too much */
-    .table-wrap { overflow-x: auto; }
+    .toolbar { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; margin: .5rem 0 .25rem; }
 
-    /* NEW: let the browser size columns naturally */
-    table { border-collapse: collapse; width: 100%; table-layout: auto; }
+    table { border-collapse: collapse; width: 100%; table-layout: auto; margin-top: 0.5rem; }
     th, td {
-      border: 1px solid #ddd; padding: var(--pad); vertical-align: top;
-      /* NEW: prefer breaking at words; only break long tokens if needed */
-      overflow-wrap: break-word; word-break: normal; white-space: normal; line-height: 1.35;
+      border: 1px solid #ddd; padding: 8px; vertical-align: top;
+      word-break: normal; overflow-wrap: break-word; white-space: normal; line-height: 1.35;
     }
-    thead th { position: sticky; top: 0; background: #fafafa; z-index: 1; }
+    thead th { position: sticky; top: 0; background: #fafafa; }
     tbody tr:nth-child(even) { background: #fcfcfc; }
 
-    /* Widen long-text columns by name (lowercased CSS class col-<name>) */
-    /* NEW: give summary a reasonable min width and allow wrapping */
-    .col-summary, .col-abstract, .col-description {
-      min-width: 60ch; max-width: 110ch; hyphens: auto;
-    }
-    .col-title { width: 36ch; }
-    .col-author, .col-authors { width: 28ch; }
+    /* Column widths */
+    .col-select  { width: 3ch; text-align: center; }
+    .col-title   { width: 28ch; }
+    .col-authors { width: 24ch; }
+    .col-keywords{ width: 28ch; }
+    .col-summary { min-width: 60ch; max-width: 120ch; }
+
     .muted { color:#666; font-size:.92rem; }
+    form.search { display:flex; flex-wrap:wrap; gap:.5rem; margin-bottom:.5rem; align-items:center; }
+    form.search label { display:flex; gap:.35rem; align-items:center; font-weight:600; }
+    form.search label input { font-weight:400; }
   </style>
 </head>
 <body>
@@ -45,292 +42,274 @@
     <div id="status">Loading…</div>
   </header>
 
-  <div class="row" style="gap:.75rem; margin-bottom:.5rem;">
-    <label for="tableSelect">Table:</label>
-    <select id="tableSelect" disabled></select>
-    <button id="showAllBtn" disabled>Show all</button>
-    <span class="muted">Showing up to <code id="limitSpan">500</code> results</span>
+  <div class="toolbar">
+    <button id="exportBtn" disabled>Output selected results (CSV)</button>
+    <button id="exportAllBtn" disabled>Download all results (CSV)</button>
+    <span class="muted">Only showing: Title, Authors, Keywords, Summary • Search is case-insensitive; commas = OR</span>
   </div>
 
-  <form id="searchForm" onsubmit="return false;" style="display:grid; grid-template-columns: auto 1fr auto; gap:.5rem; align-items:center;">
-    <label for="authorInput">Author</label>
-    <input id="authorInput" type="text" placeholder="e.g., Chumash scholar" disabled />
-    <button id="authorClear" type="button" disabled>×</button>
-
-    <label for="titleInput">Title</label>
-    <input id="titleInput" type="text" placeholder="e.g., Mayan astronomy" disabled />
-    <button id="titleClear" type="button" disabled>×</button>
-
-    <label for="keywordsInput">Keywords</label>
-    <input id="keywordsInput" type="text" placeholder="e.g., Mayan, Chumash" disabled />
-    <button id="keywordsClear" type="button" disabled>×</button>
-
-    <label for="anyInput">Any</label>
-    <input id="anyInput" type="text" placeholder="Search across Author/Title/Keywords" disabled />
-    <button id="anyClear" type="button" disabled>×</button>
+  <form id="searchForm" class="search" onsubmit="return false;">
+    <label>Author <input id="authorInput" type="text" disabled /></label>
+    <label>Title <input id="titleInput" type="text" disabled /></label>
+    <label>Keywords <input id="keywordsInput" type="text" disabled /></label>
+    <label>Any <input id="anyInput" type="text" disabled /></label>
+    <button id="searchBtn" disabled>Search</button>
+    <button id="clearBtn" disabled>Clear</button>
   </form>
 
-  <div class="row" style="gap:.5rem; margin-top:.5rem;">
-    <button id="searchBtn" disabled>Search</button>
-    <button id="clearBtn" disabled>Clear all</button>
-    <span class="muted">Search is case-insensitive and uses partial matching. Comma-separated terms use OR logic within a field.</span>
-  </div>
+  <div id="out"></div>
 
-  <hr/>
-  <!-- NEW: wrap results table in a scroll container -->
-  <div class="table-wrap" id="tableWrap">
-    <div id="out"></div>
-  </div>
-
-  <!-- sql.js: defines global initSqlJs -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.11.0/sql-wasm.js"></script>
   <script>
   const DB_URL = "https://raw.githubusercontent.com/bpenprase/archeobooks/main/archeo2.db";
   const ROW_LIMIT = 500;
-  document.getElementById('limitSpan').textContent = ROW_LIMIT;
+  const DISPLAY_COLUMNS = ["title","authors","keywords","summary"]; // lowercase target names
 
   const els = {
     status: document.getElementById('status'),
     out: document.getElementById('out'),
-    tableSelect: document.getElementById('tableSelect'),
-    showAllBtn: document.getElementById('showAllBtn'),
     author: document.getElementById('authorInput'),
     title: document.getElementById('titleInput'),
     keywords: document.getElementById('keywordsInput'),
     any: document.getElementById('anyInput'),
-    authorClear: document.getElementById('authorClear'),
-    titleClear: document.getElementById('titleClear'),
-    keywordsClear: document.getElementById('keywordsClear'),
-    anyClear: document.getElementById('anyClear'),
     searchBtn: document.getElementById('searchBtn'),
     clearBtn: document.getElementById('clearBtn'),
+    exportBtn: document.getElementById('exportBtn'),
+    exportAllBtn: document.getElementById('exportAllBtn'),
   };
 
-  let SQL, db;
-  const tableCols = new Map();
+  let SQL, db, tableName;
 
-  const COL_ALIASES = {
-    author:   ["author","authors","creator","writer"],
-    title:    ["title","book_title","name"],
-    keywords: ["keywords","tags","subjects","subject","key_words","descriptors"]
-  };
+  // current rendered data & selection state
+  let currentColumns = [];   // array of column names (actual DB casing)
+  let currentRows = [];      // array of row objects {Title: ..., Authors: ...}
+  const selected = new Set(); // indices into currentRows
 
   function setStatus(msg){ els.status.textContent = msg; }
   function escapeLike(s){ return s.replace(/([\\%_])/g,"\\$1"); }
 
   async function fetchDB(url){
-    const resp = await fetch(url, { cache: "no-store" });
-    if (!resp.ok) throw new Error("Failed to fetch DB (" + resp.status + ")");
+    const resp = await fetch(url, { cache:"no-store" });
+    if(!resp.ok) throw new Error("Failed to fetch DB: "+resp.status);
     return new Uint8Array(await resp.arrayBuffer());
   }
 
-  function renderTable(columns, values){
+  function resolveColumns(allCols){
+    // Map DISPLAY_COLUMNS to actual DB columns (case-insensitive)
+    const map = {};
+    allCols.forEach(c => { map[c.toLowerCase()] = c; });
+    return DISPLAY_COLUMNS.map(name => map[name] || null).filter(Boolean);
+  }
+
+  function renderTable(columns, rowObjs){
+    currentColumns = columns;
+    currentRows = rowObjs;
+    selected.clear();
+    els.exportBtn.disabled = currentRows.length === 0;
+    els.exportAllBtn.disabled = currentRows.length === 0;
+
     const table = document.createElement('table');
 
+    // prepare tbody before wiring header events
+    const tbody = document.createElement('tbody');
+
+    // header
     const thead = document.createElement('thead');
     const hrow = document.createElement('tr');
-    columns.forEach(col => {
+
+    // select-all checkbox
+    const thSel = document.createElement('th');
+    thSel.className = "col-select";
+    const selAll = document.createElement('input');
+    selAll.type = 'checkbox';
+    selAll.title = "Select all";
+    selAll.addEventListener('change', () => {
+      selected.clear();
+      if (selAll.checked) {
+        for (let i = 0; i < rowObjs.length; i++) selected.add(i);
+      }
+      // update all row checkboxes
+      tbody.querySelectorAll('input[type=checkbox]').forEach((cb) => {
+        cb.checked = selAll.checked;
+      });
+      selAll.indeterminate = false;
+      els.exportBtn.disabled = selected.size === 0;
+    });
+    thSel.appendChild(selAll);
+    hrow.appendChild(thSel);
+
+    columns.forEach(c=>{
       const th = document.createElement('th');
-      th.textContent = col;
-      th.className = `col-${col.toLowerCase()}`;
+      th.textContent = c;
+      th.className = "col-" + c.toLowerCase();
       hrow.appendChild(th);
     });
-    thead.appendChild(hrow);
-    table.appendChild(thead);
+    thead.appendChild(hrow); table.appendChild(thead);
 
-    const tbody = document.createElement('tbody');
-    values.forEach(row => {
+    // body rows
+    rowObjs.forEach((row, idx)=>{
       const tr = document.createElement('tr');
-      row.forEach((cell, i) => {
+
+      // per-row checkbox
+      const tdSel = document.createElement('td');
+      tdSel.className = "col-select";
+      const cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.addEventListener('change', () => {
+        if (cb.checked) selected.add(idx); else selected.delete(idx);
+        // keep header select-all in sync
+        if (selected.size === rowObjs.length) {
+          selAll.checked = true; selAll.indeterminate = false;
+        } else if (selected.size === 0) {
+          selAll.checked = false; selAll.indeterminate = false;
+        } else {
+          selAll.checked = false; selAll.indeterminate = true;
+        }
+        els.exportBtn.disabled = selected.size === 0;
+      });
+      tdSel.appendChild(cb);
+      tr.appendChild(tdSel);
+
+      // data cells
+      columns.forEach(c=>{
         const td = document.createElement('td');
-        td.textContent = (cell == null) ? "" : String(cell);
-        td.className = `col-${columns[i].toLowerCase()}`;
+        td.textContent = row[c] ?? "";
+        td.className = "col-" + c.toLowerCase();
         tr.appendChild(td);
       });
       tbody.appendChild(tr);
     });
     table.appendChild(tbody);
 
+    // mount
     els.out.innerHTML = "";
     els.out.appendChild(table);
   }
 
-  function getColumnsForTable(tableName){
-    if (tableCols.has(tableName)) return tableCols.get(tableName);
-    const res = db.exec(`PRAGMA table_info("${tableName}");`);
-    const rows = res[0]?.values || [];
-    const cols = rows.map(r => ({ name: String(r[1]), type: String(r[2] || "") }));
-    tableCols.set(tableName, cols);
-    return cols;
-  }
+  function runSearch(){
+    const fields = {
+      author: els.author.value.trim(),
+      title: els.title.value.trim(),
+      keywords: els.keywords.value.trim(),
+      any: els.any.value.trim()
+    };
+    const terms = []; const params = [];
 
-  function findColumnByAliases(tableName, aliasList){
-    const cols = getColumnsForTable(tableName);
-    const lcToOrig = new Map(cols.map(c => [c.name.toLowerCase(), c.name]));
-    for (const alias of aliasList){
-      const hit = lcToOrig.get(alias.toLowerCase());
-      if (hit) return hit;
-    }
-    return null;
-  }
+    const pragma = db.exec(`PRAGMA table_info("${tableName}")`);
+    const colmap = {}; pragma[0].values.forEach(r=>{colmap[r[1].toLowerCase()]=r[1];});
 
-  function getSearchableTextColumns(tableName){
-    const cols = getColumnsForTable(tableName);
-    const texty = cols.filter(c => /CHAR|CLOB|TEXT/i.test(c.type || ""));
-    return (texty.length ? texty : cols).map(c => c.name);
-  }
-
-  function listAll(tableName){
-    setStatus(`Listing ${tableName}…`);
-    const res = db.exec(`SELECT * FROM "${tableName}" LIMIT ${ROW_LIMIT};`);
-    if (!res || !res[0]) { els.out.innerHTML=""; setStatus("No rows."); return; }
-    const { columns, values } = res[0];
-    renderTable(columns, values);
-    setStatus(`Showing ${values.length} row(s) from ${tableName}.`);
-  }
-
-  function buildWhereAndParams(tableName, fields){
-    const whereParts = [];
-    const params = [];
-
-    const colAuthor   = findColumnByAliases(tableName, COL_ALIASES.author);
-    const colTitle    = findColumnByAliases(tableName, COL_ALIASES.title);
-    const colKeywords = findColumnByAliases(tableName, COL_ALIASES.keywords);
-
-    function addOrGroupForColumn(colName, raw){
-      if (!colName || !raw || !raw.trim()) return;
-      const terms = raw.split(",").map(s=>s.trim()).filter(Boolean);
-      if (terms.length === 0) return;
-      const ors = terms.map(()=> `lower(coalesce("${colName}", '')) LIKE ? ESCAPE '\\'`);
-      whereParts.push(`(${ors.join(" OR ")})`);
-      terms.forEach(t => params.push(`%${escapeLike(t.toLowerCase())}%`));
+    function orClause(col, raw){
+      if(!col || !raw) return "";
+      const words = raw.split(",").map(s=>s.trim()).filter(Boolean);
+      if(!words.length) return "";
+      const ors = words.map(()=>`lower("${col}") LIKE ? ESCAPE '\\'`).join(" OR ");
+      words.forEach(w=>params.push("%"+escapeLike(w.toLowerCase())+"%"));
+      return `(${ors})`;
     }
 
-    addOrGroupForColumn(colAuthor, fields.author);
-    addOrGroupForColumn(colTitle, fields.title);
-    addOrGroupForColumn(colKeywords, fields.keywords);
+    if(fields.author && colmap["authors"]) terms.push(orClause(colmap["authors"], fields.author));
+    if(fields.title && colmap["title"]) terms.push(orClause(colmap["title"], fields.title));
+    if(fields.keywords && colmap["keywords"]) terms.push(orClause(colmap["keywords"], fields.keywords));
 
-    if (fields.any && fields.any.trim()){
-      const terms = fields.any.split(",").map(s=>s.trim()).filter(Boolean);
-      const cols = [colAuthor, colTitle, colKeywords].filter(Boolean);
-      const colsAny = cols.length ? cols : getSearchableTextColumns(tableName);
-      const anyGroup = terms.map(term => {
-        const ors = colsAny.map(c => `lower(coalesce("${c}",'')) LIKE ? ESCAPE '\\'`).join(" OR ");
-        params.push(...Array(colsAny.length).fill(`%${escapeLike(term.toLowerCase())}%`));
-        return `(${ors})`;
-      }).join(" AND ");
-      whereParts.push(`(${anyGroup})`);
+    if(fields.any){
+      const anyCols = DISPLAY_COLUMNS.map(n=>colmap[n]).filter(Boolean);
+      const words = fields.any.split(",").map(s=>s.trim()).filter(Boolean);
+      words.forEach(w=>{
+        const ors = anyCols.map(c=>`lower("${c}") LIKE ? ESCAPE '\\'`).join(" OR ");
+        params.push(...Array(anyCols.length).fill("%"+escapeLike(w.toLowerCase())+"%"));
+        terms.push("("+ors+")");
+      });
     }
 
-    const whereClause = whereParts.length ? `WHERE ${whereParts.join(" AND ")}` : "";
-    return { whereClause, params };
-  }
+    const where = terms.length ? "WHERE "+terms.join(" AND ") : "";
+    const sql = `SELECT * FROM "${tableName}" ${where} LIMIT ${ROW_LIMIT};`;
+    const stmt = db.prepare(sql); if(params.length) stmt.bind(params);
 
-  function runSearch(tableName, fields){
-    const { whereClause, params } = buildWhereAndParams(tableName, fields);
-    const sql = `SELECT * FROM "${tableName}" ${whereClause} LIMIT ${ROW_LIMIT};`;
+    const rows=[]; while(stmt.step()) rows.push(stmt.getAsObject()); stmt.free();
 
-    const stmt = db.prepare(sql);
-    if (params.length) stmt.bind(params);
-
-    const columns = []; let colsCaptured = false;
-    const values = [];
-    while (stmt.step()){
-      const row = stmt.getAsObject();
-      if (!colsCaptured){
-        Object.keys(row).forEach(k => columns.push(k));
-        colsCaptured = true;
-      }
-      values.push(columns.map(k => row[k]));
-      if (values.length >= ROW_LIMIT) break;
-    }
-    stmt.free();
-
-    if (values.length === 0){
-      els.out.innerHTML = "";
+    if(!rows.length){
+      els.out.textContent="No matches.";
       setStatus("No matches.");
+      els.exportBtn.disabled = true;
+      els.exportAllBtn.disabled = true;
+      currentColumns = []; currentRows = []; selected.clear();
       return;
     }
-    renderTable(columns, values);
-    setStatus(`Found ${values.length} match(es).`);
+
+    // Determine which columns to show and build a subset for rendering
+    const displayCols = resolveColumns(Object.keys(rows[0]));
+    const subset = rows.map(r => {
+      const o={}; displayCols.forEach(c => o[c] = r[c]); return o;
+    });
+
+    renderTable(displayCols, subset);
+    setStatus("Found "+rows.length+" match(es).");
+  }
+
+  function toCSV(rows, columns){
+    const esc = v => {
+      const s = (v == null ? "" : String(v));
+      if (/["\n,]/.test(s)) return '"' + s.replace(/"/g, '""') + '"';
+      return s;
+    };
+    const header = columns.map(esc).join(",");
+    const body = rows.map(r => columns.map(c => esc(r[c])).join(",")).join("\n");
+    return header + "\n" + body;
+  }
+
+  function downloadCSV(rows, columns, prefix){
+    const csv = toCSV(rows, columns);
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    const ts = new Date().toISOString().slice(0,19).replace(/[:T]/g,'-');
+    a.href = url;
+    a.download = `${prefix}-${ts}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }
+
+  function exportSelected(){
+    if (selected.size === 0) return;
+    const indices = Array.from(selected).sort((a,b)=>a-b);
+    const rows = indices.map(i => currentRows[i]);
+    downloadCSV(rows, currentColumns, "archeobooks-selected");
+  }
+
+  function exportAll(){
+    if (!currentRows.length) return;
+    downloadCSV(currentRows, currentColumns, "archeobooks-all-results");
   }
 
   async function main(){
-    setStatus("Loading SQL engine…");
-    const SQLMod = await initSqlJs({
-      locateFile: f => `https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.11.0/${f}`
-    });
+    setStatus("Loading engine…");
+    const SQLMod = await initSqlJs({ locateFile: f=>`https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.11.0/${f}` });
     SQL = SQLMod;
-
-    setStatus("Fetching database…");
     const bytes = await fetchDB(DB_URL);
-
-    setStatus("Opening database…");
     db = new SQL.Database(bytes);
 
-    const tablesRes = db.exec(`
-      SELECT name FROM sqlite_master
-      WHERE type='table' AND name NOT LIKE 'sqlite_%'
-      ORDER BY name COLLATE NOCASE;
-    `);
-    if (!tablesRes.length || !tablesRes[0].values.length){
-      setStatus("No tables found.");
-      return;
-    }
-    const tables = tablesRes[0].values.map(v => v[0]);
-    const defaultTable = tables.includes('books') ? 'books' : tables[0];
+    // pick first user table
+    const tables = db.exec(`SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name;`);
+    tableName = tables[0].values[0][0];
 
-    els.tableSelect.innerHTML = "";
-    tables.forEach(t => {
-      const opt = document.createElement('option');
-      opt.value = t; opt.textContent = t;
-      if (t === defaultTable) opt.selected = true;
-      els.tableSelect.appendChild(opt);
-    });
+    // enable form & buttons
+    [els.author,els.title,els.keywords,els.any,els.searchBtn,els.clearBtn].forEach(el=>el.disabled=false);
+    els.exportBtn.disabled = true;
+    els.exportAllBtn.disabled = true;
 
-    [
-      els.tableSelect, els.showAllBtn,
-      els.author, els.title, els.keywords, els.any,
-      els.authorClear, els.titleClear, els.keywordsClear, els.anyClear,
-      els.searchBtn, els.clearBtn
-    ].forEach(el => el.disabled = false);
+    els.searchBtn.onclick=runSearch;
+    els.clearBtn.onclick=()=>{els.author.value=els.title.value=els.keywords.value=els.any.value=""; runSearch();};
+    els.exportBtn.onclick=exportSelected;
+    els.exportAllBtn.onclick=exportAll;
+    [els.author,els.title,els.keywords,els.any].forEach(inp=>inp.addEventListener("keydown",e=>{if(e.key==="Enter") runSearch();}));
 
-    listAll(defaultTable);
-
-    els.tableSelect.addEventListener('change', () => {
-      els.author.value = els.title.value = els.keywords.value = els.any.value = "";
-      listAll(els.tableSelect.value);
-    });
-    els.showAllBtn.addEventListener('click', () => {
-      els.author.value = els.title.value = els.keywords.value = els.any.value = "";
-      listAll(els.tableSelect.value);
-    });
-
-    els.authorClear.onclick = () => els.author.value = "";
-    els.titleClear.onclick = () => els.title.value = "";
-    els.keywordsClear.onclick = () => els.keywords.value = "";
-    els.anyClear.onclick = () => els.any.value = "";
-
-    els.clearBtn.addEventListener('click', () => {
-      els.author.value = els.title.value = els.keywords.value = els.any.value = "";
-      listAll(els.tableSelect.value);
-    });
-
-    function doSearch(){
-      runSearch(els.tableSelect.value, {
-        author: els.author.value,
-        title: els.title.value,
-        keywords: els.keywords.value,
-        any: els.any.value
-      });
-    }
-    els.searchBtn.addEventListener('click', doSearch);
-    [els.author, els.title, els.keywords, els.any].forEach(inp => {
-      inp.addEventListener('keydown', e => { if (e.key === 'Enter') doSearch(); });
-    });
+    // initial list (no filters)
+    runSearch();
   }
 
-  main().catch(err => { setStatus("Error: " + err.message); console.error(err); });
+  main().catch(e=>{setStatus("Error: "+e.message); console.error(e);});
   </script>
 </body>
 </html>
