@@ -4,96 +4,174 @@
   <meta charset="utf-8" />
   <title>archeo2.db viewer</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <!-- Basic styling -->
   <style>
-    body { font-family: system-ui, sans-serif; margin: 1.5rem; }
+    :root { --pad: 12px; }
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 1.5rem; }
+    header { display: flex; flex-wrap: wrap; gap: .75rem; align-items: center; margin-bottom: 1rem; }
+    #status { font-size: .95rem; color: #444; }
+    select, button { padding: .4rem .6rem; }
     table { border-collapse: collapse; width: 100%; table-layout: fixed; }
-    th, td { border: 1px solid #ddd; padding: .5rem; vertical-align: top; overflow-wrap: anywhere; }
-    thead th { position: sticky; top: 0; background: #fafafa; }
-    /* Make one field larger: adjust the class to your column name */
-    .col-summary { width: 60ch; }   /* widen */
-    .col-title   { width: 30ch; }
-    .col-author  { width: 22ch; }
+    th, td { border: 1px solid #ddd; padding: var(--pad); vertical-align: top; overflow-wrap: anywhere; }
+    thead th { position: sticky; top: 0; background: #fafafa; z-index: 1; }
+    tbody tr:nth-child(even) { background: #fcfcfc; }
+
+    /* Adjust widths by column name (lowercased). Edit these as needed. */
+    .col-summary { width: 80ch; }  /* make the summary/abstract column wide */
+    .col-title   { width: 32ch; }
+    .col-author  { width: 24ch; }
   </style>
 </head>
 <body>
-  <h1>archeo2.db</h1>
-  <p>Showing first 200 rows from <code>books</code>. Edit the query in the code to change.</p>
-  <div id="status">Loading database…</div>
+  <header>
+    <h1 style="margin:0;">archeo2.db</h1>
+    <div id="status">Loading…</div>
+  </header>
+
+  <section style="margin-bottom: .75rem;">
+    <label for="tableSelect"><strong>Table:</strong></label>
+    <select id="tableSelect" disabled></select>
+    <button id="reloadBtn" disabled>Reload</button>
+  </section>
+
+  <p id="hint" style="margin-top:0.25rem; color:#555;">
+    Showing first <code>200</code> rows. To widen a field, edit the CSS class <code>.col-&lt;column-name-lowercased&gt;</code> above.
+  </p>
+
   <div id="out"></div>
 
-  <!-- sql.js from CDN -->
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.10.2/sql-wasm.js"
-          integrity="sha512-+p3w9lKpU5Cz0zOelYQuV9nUHElSvlp3u3Zl1G6YgPrRer5U2b1xzgqO3o0d8n+6A1oYB6hYIbWZ4w3nFYGtGg=="
-          crossorigin="anonymous" referrerpolicy="no-referrer"></script>
-
+  <!-- sql.js: defines global initSqlJs -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.11.0/sql-wasm.js"></script>
   <script>
-    const DB_URL = "https://raw.githubusercontent.com/bpenprase/archeobooks/main/archeo2.db"; // change if needed
-    const QUERY  = "SELECT * FROM books LIMIT 200;"; // change table/query
+  // ====== EDIT THIS IF YOU MOVE THE FILE ======
+  const DB_URL = "https://raw.githubusercontent.com/bpenprase/archeobooks/main/archeo2.db";
+  // ============================================
 
-    async function main() {
-      const status = document.getElementById('status');
-      status.textContent = "Fetching DB…";
+  const ROW_LIMIT = 200;
 
-      // Load sql.js
-      const SQL = await initSqlJs({ locateFile: f => `https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.10.2/${f}` });
+  const els = {
+    status: document.getElementById('status'),
+    out: document.getElementById('out'),
+    tableSelect: document.getElementById('tableSelect'),
+    reloadBtn: document.getElementById('reloadBtn'),
+  };
 
-      // Fetch DB bytes (ensure CORS allows this; GitHub Pages works well)
-      const resp = await fetch(DB_URL);
-      if (!resp.ok) throw new Error(`Failed to fetch DB: ${resp.status}`);
-      const buf = new Uint8Array(await resp.arrayBuffer());
+  function setStatus(msg) { els.status.textContent = msg; }
 
-      // Open DB
+  function renderTable(columns, values) {
+    const table = document.createElement('table');
+
+    const thead = document.createElement('thead');
+    const hrow = document.createElement('tr');
+    columns.forEach(col => {
+      const th = document.createElement('th');
+      th.textContent = col;
+      th.className = `col-${col.toLowerCase()}`;
+      hrow.appendChild(th);
+    });
+    thead.appendChild(hrow);
+    table.appendChild(thead);
+
+    const tbody = document.createElement('tbody');
+    values.forEach(row => {
+      const tr = document.createElement('tr');
+      row.forEach((cell, i) => {
+        const td = document.createElement('td');
+        td.textContent = cell == null ? "" : String(cell);
+        td.className = `col-${columns[i].toLowerCase()}`;
+        tr.appendChild(td);
+      });
+      tbody.appendChild(tr);
+    });
+    table.appendChild(tbody);
+
+    els.out.innerHTML = "";
+    els.out.appendChild(table);
+  }
+
+  async function openDbBytes(url) {
+    const resp = await fetch(url);
+    if (!resp.ok) throw new Error(`Failed to fetch DB (${resp.status})`);
+    return new Uint8Array(await resp.arrayBuffer());
+  }
+
+  async function load() {
+    try {
+      setStatus("Loading sql.js…");
+      const SQL = await initSqlJs({
+        locateFile: f => `https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.11.0/${f}`
+      });
+
+      setStatus("Fetching database…");
+      const buf = await openDbBytes(DB_URL);
+
+      setStatus("Opening database…");
       const db = new SQL.Database(buf);
 
-      // Run query
-      const res = db.exec(QUERY);
-      if (!res || !res[0]) {
-        status.textContent = "Query returned no rows (check table name/query).";
+      // Discover tables
+      const tablesRes = db.exec(`
+        SELECT name FROM sqlite_master
+        WHERE type='table' AND name NOT LIKE 'sqlite_%'
+        ORDER BY name COLLATE NOCASE;
+      `);
+
+      if (!tablesRes.length || !tablesRes[0].values.length) {
+        setStatus("No user tables found in database.");
         return;
       }
-      const { columns, values } = res[0];
 
-      // Build table
-      const out = document.getElementById('out');
-      const table = document.createElement('table');
+      const tables = tablesRes[0].values.map(v => v[0]);
+      // Default to 'books' if present, otherwise first table
+      const defaultTable = tables.includes('books') ? 'books' : tables[0];
 
-      // Header
-      const thead = document.createElement('thead');
-      const hrow = document.createElement('tr');
-      columns.forEach(col => {
-        const th = document.createElement('th');
-        th.textContent = col;
-        // Add a class like col-summary for CSS width control
-        th.className = `col-${col.toLowerCase()}`;
-        hrow.appendChild(th);
+      // Populate dropdown
+      els.tableSelect.innerHTML = "";
+      tables.forEach(t => {
+        const opt = document.createElement('option');
+        opt.value = t;
+        opt.textContent = t;
+        if (t === defaultTable) opt.selected = true;
+        els.tableSelect.appendChild(opt);
       });
-      thead.appendChild(hrow);
-      table.appendChild(thead);
+      els.tableSelect.disabled = false;
+      els.reloadBtn.disabled = false;
 
-      // Body
-      const tbody = document.createElement('tbody');
-      values.forEach(row => {
-        const tr = document.createElement('tr');
-        row.forEach((cell, i) => {
-          const td = document.createElement('td');
-          td.textContent = cell == null ? "" : String(cell);
-          td.className = `col-${columns[i].toLowerCase()}`;
-          tr.appendChild(td);
-        });
-        tbody.appendChild(tr);
+      function runQueryFor(tableName) {
+        setStatus(`Querying ${tableName}…`);
+        try {
+          const res = db.exec(`SELECT * FROM "${tableName}" LIMIT ${ROW_LIMIT};`);
+          if (!res || !res[0]) {
+            els.out.innerHTML = "";
+            setStatus(`No rows in ${tableName}.`);
+            return;
+          }
+          const { columns, values } = res[0];
+          renderTable(columns, values);
+          setStatus(`Loaded ${values.length} rows from ${tableName}.`);
+        } catch (e) {
+          els.out.innerHTML = "";
+          setStatus(`Error querying ${tableName}: ${e.message}`);
+          console.error(e);
+        }
+      }
+
+      // Initial render
+      runQueryFor(defaultTable);
+
+      // UI events
+      els.tableSelect.addEventListener('change', () => {
+        runQueryFor(els.tableSelect.value);
       });
-      table.appendChild(tbody);
+      els.reloadBtn.addEventListener('click', () => {
+        runQueryFor(els.tableSelect.value);
+      });
 
-      out.innerHTML = "";
-      out.appendChild(table);
-      status.textContent = `Loaded ${values.length} rows.`;
-    }
-
-    main().catch(err => {
-      document.getElementById('status').textContent = `Error: ${err.message}`;
+    } catch (err) {
+      setStatus(`Error: ${err.message}`);
       console.error(err);
-    });
+    }
+  }
+
+  load();
   </script>
 </body>
 </html>
