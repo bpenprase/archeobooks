@@ -47,7 +47,7 @@
   <div class="toolbar">
     <button id="exportBtn" disabled>Output selected results (CSV)</button>
     <button id="exportAllBtn" disabled>Download all results (CSV)</button>
-    <span class="muted">Showing: Title, Author, Keywords, Year, Pages, Summary • Search is case-insensitive; commas = OR</span>
+    <span class="muted">Showing: Code, Title, Author, Keywords, Publisher, Year, Pages, Summary • Search is case-insensitive; commas = OR</span>
   </div>
 
   <form id="searchForm" class="search" onsubmit="return false;">
@@ -68,9 +68,11 @@
 
   // Desired display order/labels + flexible aliases in your DB
   const DISPLAY_SPEC = [
+    { label: "Code",    aliases: ["code","shelf_code","call_number"] },
     { label: "Title",   aliases: ["title","book_title","name"] },
     { label: "Author",  aliases: ["author","authors","creator","writer"] },
     { label: "Keywords",aliases: ["keywords","tags","subjects","subject","key_words","descriptors"] },
+    { label: "Publisher",aliases: ["publisher","imprint","press"] },
     { label: "Year",    aliases: ["year","pub_year","publication_year","year_published","date_year"] },
     { label: "Pages",   aliases: ["pages","pagecount","page_count","pgs","num_pages","extent"] },
     { label: "Summary", aliases: ["summary","abstract","description","notes"] },
@@ -254,7 +256,8 @@
 
     if (fields.any && fields.any.trim()){
       // Any searches across Title/Author/Keywords; if any missing, skip them
-      const anyCols = [titleCol, authorCol, keywordsCol].filter(Boolean);
+      const codeCol = findByAliases(["code","shelf_code","call_number"]);
+      const anyCols = [titleCol, authorCol, keywordsCol, codeCol].filter(Boolean);
       const parts = fields.any.split(",").map(s=>s.trim()).filter(Boolean);
       // Require all terms (AND); each term can match any of the anyCols (OR)
       parts.forEach(term => {
